@@ -91,7 +91,7 @@ In real Cursor agent sessions, mature conversations regularly hit the practical 
 
 Azure and Codex stream Responses-style SSE events. The proxy converts provider SSE back to OpenAI Chat Completions chunks for Cursor, and the Azure adapter handles the broad Azure event surface:
 
-- **Reasoning:** `reasoning_text.delta`, `reasoning_summary_text.delta` — streamed inside `<think>` tags
+- **Reasoning:** `reasoning_text.delta`, `reasoning_summary_text.delta` — streamed as native reasoning fields (`reasoning`, `reasoning_content`, `reasoning_details`, and common thinking-block aliases), with configurable display fallbacks because Cursor's current BYOK path ignores native reasoning metadata
 - **Text:** `output_text.delta` — standard content streaming
 - **Tool calls:** `function_call.arguments.delta`, `custom_tool_call_input.delta` — incremental argument streaming
 - **Native Azure tools:** `apply_patch_call`, `shell_call`, `local_shell_call`, `mcp_call`, `computer_call` — converted to standard function calls Cursor understands
@@ -101,6 +101,16 @@ Azure and Codex stream Responses-style SSE events. The proxy converts provider S
 - **Code interpreter:** `code_interpreter_call_code.delta`
 - **Lifecycle events** (created, queued, in_progress, done) — silently skipped
 - **Unknown events** — logged, never silently dropped
+
+#### Reasoning Display Mode
+
+Set `REASONING_DISPLAY_MODE` to choose how reasoning is shown to Cursor:
+
+- `none` hides reasoning text from normal chat output while still preserving native reasoning metadata in the stream. This avoids ugly fallback UI, but Cursor currently shows no thinking block.
+- `mdthinkblocks` mirrors reasoning into Markdown `<details>` blocks. This is a new, unstable fallback: it can look bad in Cursor and may sometimes fail to show the thinking block consistently.
+- `thinkblocks` mirrors reasoning into legacy visible `<think>...</think>` chat content. This is mostly useful for debugging or old Cursor behavior.
+
+Native Cursor thinking blocks are intentionally treated as unresolved for BYOK/proxy mode. If Cursor adds support for native reasoning metadata in the future, `none` is the closest mode to that desired wire format.
 
 ### Dual Input Format Support
 

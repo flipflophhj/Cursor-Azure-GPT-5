@@ -17,9 +17,12 @@ from rich.live import Live
 from ..common.logging import console, create_message_panel
 from ..common.sse import chunks_to_sse, sse_to_events
 from ..exceptions import ClientClosedConnection
-
-# Centralized events that should end a <think> block before handling
-THINKING_STOP_EVENTS = {"response.output_text.delta", "response.output_item.added"}
+from ..reasoning_display import (
+    parse_reasoning_display_mode,
+    reasoning_content_delta,
+    reasoning_end_delta,
+    reasoning_start_delta,
+)
 
 # Events we intentionally skip without logging (pure lifecycle / status noise)
 _SILENT_EVENTS = {
@@ -64,12 +67,13 @@ class ResponseAdapter:
     """Handle post-request adaptation from Azure Responses API to Flask.
 
     Translates Azure SSE events into OpenAI Chat Completions chunks, including
-    reasoning <think> tags and function call streaming.
+    native reasoning deltas and function call streaming.
     """
 
     # Per-request chat completion id (for streaming)
     _chat_completion_id: Optional[str]
-    _thinking: bool
+    _reasoning_open: bool
+    _reasoning_display_mode: str
     _tool_calls: int
     _usage: Optional[Dict[str, Any]]
 
@@ -237,9 +241,12 @@ class ResponseAdapter:
         item_type = item.get("type")
 
         if item_type == "reasoning":
-            self._thinking = True
-            return self._build_completion_chunk(
-                delta={"role": "assistant", "content": "<think>\n\n"}
+            start_delta = reasoning_start_delta(self._reasoning_display_mode)
+            self._reasoning_open = start_delta is not None
+            return (
+                self._build_completion_chunk(delta=start_delta)
+                if start_delta is not None
+                else None
             )
         if item_type == "function_call":
             self._tool_calls += 1
@@ -374,20 +381,33 @@ class ResponseAdapter:
             }
         )
 
+    def _build_reasoning_chunk(self, obj: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Build a Chat Completions chunk with Cursor-native reasoning content."""
+        delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        return self._build_completion_chunk(
+            delta=reasoning_content_delta(delta, self._reasoning_display_mode)
+        )
+
+    def _close_reasoning_chunk(self) -> Optional[Dict[str, Any]]:
+        """Close any visible reasoning wrapper before normal output resumes."""
+        if not self._reasoning_open:
+            return None
+        self._reasoning_open = False
+        closing_delta = reasoning_end_delta(self._reasoning_display_mode)
+        if closing_delta is None:
+            return None
+        return self._build_completion_chunk(delta=closing_delta)
+
     # ---- Reasoning text (raw, not summary) ----
     def _reasoning_text__delta(
         self, obj: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
         """Handle response.reasoning_text.delta — raw reasoning content.
 
-        We emit this inside <think> tags the same way we do summaries.
+        Cursor renders this separately from normal assistant content when it
+        arrives as a native reasoning delta.
         """
-        return self._build_completion_chunk(
-            delta={
-                "role": "assistant",
-                "content": (obj.get("delta", "") if isinstance(obj, dict) else ""),
-            }
-        )
+        return self._build_reasoning_chunk(obj)
 
     # ---- MCP call argument streaming ----
     def _mcp_call_arguments__delta(
@@ -467,21 +487,14 @@ class ResponseAdapter:
     def _reasoning_summary_text__delta(
         self, obj: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        """Handle reasoning.summary_text.delta events and emit text chunk."""
-        return self._build_completion_chunk(
-            delta={
-                "role": "assistant",
-                "content": (obj.get("delta", "") if isinstance(obj, dict) else ""),
-            }
-        )
+        """Handle reasoning.summary_text.delta events as native reasoning."""
+        return self._build_reasoning_chunk(obj)
 
     def _reasoning_summary_text__done(
         self, obj: Optional[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        """Handle reasoning.summary_text.done events and close with blank line inside think block."""
-        return self._build_completion_chunk(
-            delta={"role": "assistant", "content": "\n\n"}
-        )
+        """Handle reasoning.summary_text.done events."""
+        return None
 
     def _output_text__delta(
         self, obj: Optional[Dict[str, Any]]
@@ -575,7 +588,10 @@ class ResponseAdapter:
             # Generate once per stream
             self._chat_completion_id = self._create_chat_completion_id()
             # Initialize per-stream state on the instance
-            self._thinking = False
+            self._reasoning_open = False
+            self._reasoning_display_mode = parse_reasoning_display_mode(
+                current_app.config["REASONING_DISPLAY_MODE"]
+            )
             self._tool_calls = 0
             self._usage = None
 
@@ -621,15 +637,24 @@ class ResponseAdapter:
                                 )
                             continue
 
-                        # Centrally close <think> blocks whenever a stop event is seen
-                        if self._thinking and (ev.event in THINKING_STOP_EVENTS):
-                            yield self._build_completion_chunk(
-                                delta={"role": "assistant", "content": "</think>\n\n"}
-                            )
-                            self._thinking = False
+                        if self._reasoning_open and raw_event in {
+                            "response.output_text.delta",
+                            "response.output_item.added",
+                            "response.completed",
+                            "response.failed",
+                            "response.incomplete",
+                        }:
+                            closing = self._close_reasoning_chunk()
+                            if closing is not None:
+                                yield closing
 
-                            if current_app.config["LOG_COMPLETION"]:
-                                completion_msg["content"] += "</think>\n\n"
+                                if current_app.config["LOG_COMPLETION"]:
+                                    closing_delta = closing.get("choices", [{}])[0].get(
+                                        "delta", {}
+                                    )
+                                    content = closing_delta.get("content")
+                                    if content is not None:
+                                        completion_msg["content"] += content
 
                         res = handler(ev.json)
                         if res is not None:
@@ -675,6 +700,9 @@ class ResponseAdapter:
                         f"[bold cyan]STREAM_END:[/bold cyan] events={events}, "
                         f"tool_calls={self._tool_calls}, finish_reason={finish}"
                     )
+                    closing = self._close_reasoning_chunk()
+                    if closing is not None:
+                        yield closing
                     if self._tool_calls > 0:
                         yield self._build_completion_chunk(finish_reason="tool_calls")
                     else:

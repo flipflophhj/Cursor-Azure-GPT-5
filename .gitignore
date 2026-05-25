@@ -33,6 +33,7 @@ output/*.html
 output/*/index.html
 
 # Virtualenvs
+env
 env/
 .venv/
 

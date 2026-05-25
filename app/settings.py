@@ -7,6 +7,10 @@ from .codex.settings import (
     parse_codex_supported_models,
 )
 from .models import parse_model_deployments
+from .reasoning_display import (
+    DEFAULT_REASONING_DISPLAY_MODE,
+    parse_reasoning_display_mode,
+)
 
 env = Env()
 env.read_env()
@@ -16,6 +20,9 @@ DEBUG = ENV == "development"
 RECORD_TRAFFIC = env.bool("RECORD_TRAFFIC", False)
 LOG_CONTEXT = env.bool("LOG_CONTEXT", True)
 LOG_COMPLETION = env.bool("LOG_COMPLETION", True)
+REASONING_DISPLAY_MODE = parse_reasoning_display_mode(
+    env.str("REASONING_DISPLAY_MODE", DEFAULT_REASONING_DISPLAY_MODE)
+)
 
 SERVICE_API_KEY = env.str("SERVICE_API_KEY", "change-me")
 

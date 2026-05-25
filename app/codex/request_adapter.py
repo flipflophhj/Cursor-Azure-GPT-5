@@ -7,6 +7,16 @@ from typing import Any
 
 from .settings import CodexSettings
 
+_CODEX_RESPONSES_UNSUPPORTED_PARAMS = {
+    "frequency_penalty",
+    "max_output_tokens",
+    "max_tokens",
+    "presence_penalty",
+    "temperature",
+    "top_logprobs",
+    "top_p",
+}
+
 
 class UnsupportedCursorShape(RuntimeError):
     """The downstream request is not a supported Cursor request shape."""
@@ -39,14 +49,28 @@ class CursorRequestAdapter:
         self._validate_cursor_marker(payload, headers)
 
         if "messages" in payload:
+            request_format = "chat"
             body = self._chat_to_responses(payload)
         elif "input" in payload:
+            request_format = "responses"
             body = self._responses_passthrough(payload)
         else:
             raise UnsupportedCursorShape(
                 "Unsupported Cursor request shape: missing input or messages."
             )
+        inbound_model = body.get("model")
         self._rewrite_model(body)
+        upstream_model = body.get("model")
+        reasoning = body.get("reasoning") if isinstance(body, dict) else None
+        effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+
+        from ..common.logging import console
+
+        console.print(
+            "[bold cyan]CODEX REQUEST:[/bold cyan] "
+            f"inbound_model={inbound_model} upstream_model={upstream_model} "
+            f"effort={effort} fmt={request_format}"
+        )
 
         session_id = self._session_identity(payload, headers)
         thread_id = session_id
@@ -121,6 +145,8 @@ class CursorRequestAdapter:
         out.pop("metadata", None)
         out.pop("user", None)
         out.pop("prompt_cache_retention", None)
+        for key in _CODEX_RESPONSES_UNSUPPORTED_PARAMS:
+            out.pop(key, None)
         if not out.get("instructions"):
             out["instructions"] = _default_instructions()
         if isinstance(out.get("input"), str):

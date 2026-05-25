@@ -109,6 +109,11 @@ class CodexSettings:
         """Return Codex upstream request timeout in seconds."""
         return float(current_app.config["CODEX_REQUEST_TIMEOUT_SECONDS"])
 
+    @property
+    def reasoning_display_mode(self) -> str:
+        """Return configured reasoning display mode."""
+        return str(current_app.config["REASONING_DISPLAY_MODE"])
+
 
 def codex_model_payload(settings: Any | None = None) -> dict[str, Any]:
     """Return OpenAI-compatible model list payload for Codex."""

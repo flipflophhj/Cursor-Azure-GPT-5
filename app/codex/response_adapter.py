@@ -9,7 +9,13 @@ from dataclasses import dataclass
 from string import ascii_letters, digits
 from typing import Any, Iterable, Iterator
 
-THINKING_STOP_EVENTS = {"response.output_text.delta", "response.output_item.added"}
+from ..reasoning_display import (
+    DEFAULT_REASONING_DISPLAY_MODE,
+    parse_reasoning_display_mode,
+    reasoning_content_delta,
+    reasoning_end_delta,
+    reasoning_start_delta,
+)
 
 
 @dataclass
@@ -79,24 +85,30 @@ class SSEDecoder:
 class ChatSSEAdapter:
     """Translate Codex Responses SSE events into Chat Completions chunks."""
 
-    def __init__(self, model: str):
+    def __init__(self, model: str, reasoning_display_mode: str):
         """Initialize stream state for one chat response."""
         self.model = model
+        self.reasoning_display_mode = parse_reasoning_display_mode(
+            reasoning_display_mode
+        )
         self.chat_id = _chat_completion_id()
-        self.thinking = False
         self.tool_calls = 0
         self.usage: dict[str, Any] | None = None
+        self.reasoning_open = False
 
     def handle(self, event: SSEEvent) -> list[dict[str, Any]]:
         """Handle one upstream SSE event."""
         event_name = event.event or ""
         obj = event.json
         chunks: list[dict[str, Any]] = []
-        if self.thinking and event_name in THINKING_STOP_EVENTS:
-            chunks.append(
-                self._chunk(delta={"role": "assistant", "content": "</think>\n\n"})
-            )
-            self.thinking = False
+        if self.reasoning_open and event_name in {
+            "response.output_text.delta",
+            "response.output_item.added",
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+        }:
+            chunks.extend(self._close_reasoning())
 
         if event_name == "response.output_item.added":
             chunk = self._output_item_added(obj)
@@ -105,10 +117,13 @@ class ChatSSEAdapter:
             "response.refusal.delta",
             "response.audio.transcript.delta",
             "response.code_interpreter_call_code.delta",
+        }:
+            chunk = self._text_delta(obj)
+        elif event_name in {
             "response.reasoning_text.delta",
             "response.reasoning_summary_text.delta",
         }:
-            chunk = self._text_delta(obj)
+            chunk = self._reasoning_delta(obj)
         elif event_name in {
             "response.function_call_arguments.delta",
             "response.custom_tool_call_input.delta",
@@ -132,11 +147,20 @@ class ChatSSEAdapter:
     def finish(self) -> list[dict[str, Any]]:
         """Build terminal chunks."""
         finish_reason = "tool_calls" if self.tool_calls else "stop"
-        chunks = [self._chunk(finish_reason=finish_reason)]
+        chunks = self._close_reasoning()
+        chunks.append(self._chunk(finish_reason=finish_reason))
         usage = self._usage_chunk()
         if usage is not None:
             chunks.append(usage)
         return chunks
+
+    def _close_reasoning(self) -> list[dict[str, Any]]:
+        """Close any visible reasoning wrapper before normal output resumes."""
+        if not self.reasoning_open:
+            return []
+        self.reasoning_open = False
+        closing_delta = reasoning_end_delta(self.reasoning_display_mode)
+        return [self._chunk(delta=closing_delta)] if closing_delta is not None else []
 
     def _chunk(
         self,
@@ -162,8 +186,9 @@ class ChatSSEAdapter:
         item = obj.get("item", {}) if isinstance(obj, dict) else {}
         item_type = item.get("type")
         if item_type == "reasoning":
-            self.thinking = True
-            return self._chunk(delta={"role": "assistant", "content": "<think>\n\n"})
+            start_delta = reasoning_start_delta(self.reasoning_display_mode)
+            self.reasoning_open = start_delta is not None
+            return self._chunk(delta=start_delta) if start_delta is not None else None
         if item_type in {"function_call", "custom_tool_call"}:
             self.tool_calls += 1
             return self._chunk(
@@ -190,6 +215,12 @@ class ChatSSEAdapter:
     def _text_delta(self, obj: Any) -> dict[str, Any]:
         delta = obj.get("delta", "") if isinstance(obj, dict) else ""
         return self._chunk(delta={"role": "assistant", "content": delta})
+
+    def _reasoning_delta(self, obj: Any) -> dict[str, Any]:
+        delta = obj.get("delta", "") if isinstance(obj, dict) else ""
+        return self._chunk(
+            delta=reasoning_content_delta(delta, self.reasoning_display_mode)
+        )
 
     def _tool_arguments_delta(self, obj: Any) -> dict[str, Any] | None:
         if self.tool_calls < 1:
@@ -266,11 +297,14 @@ class ChatSSEAdapter:
 
 
 def adapt_responses_sse_to_chat_sse(
-    chunks: Iterable[bytes], *, model: str
+    chunks: Iterable[bytes],
+    *,
+    model: str,
+    reasoning_display_mode: str = DEFAULT_REASONING_DISPLAY_MODE,
 ) -> Iterator[bytes]:
     """Adapt an upstream Responses SSE byte stream to Chat Completions SSE."""
     decoder = SSEDecoder()
-    adapter = ChatSSEAdapter(model)
+    adapter = ChatSSEAdapter(model, reasoning_display_mode)
     for chunk in chunks:
         for event in decoder.feed(chunk):
             for message in adapter.handle(event):

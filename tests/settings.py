@@ -20,6 +20,7 @@ AZURE_TRUNCATION = "disabled"
 RECORD_TRAFFIC = False
 LOG_CONTEXT = True
 LOG_COMPLETION = True
+REASONING_DISPLAY_MODE = "mdthinkblocks"
 
 
 AZURE_RESPONSES_API_URL = f"{AZURE_BASE_URL}/openai/v1/responses"

@@ -67,6 +67,35 @@ def test_codex_responses_payload_defaults_missing_instructions():
     ]
 
 
+def test_codex_responses_payload_strips_litellm_chat_controls():
+    """Strip LiteLLM chat controls that Codex rejects."""
+    adapter = CursorRequestAdapter(Settings(discovery_mode=True))
+
+    adapted = adapter.adapt(
+        "/v1/responses",
+        {
+            "model": "gpt-5.4-mini",
+            "input": "hello",
+            "frequency_penalty": 0,
+            "max_output_tokens": 32768,
+            "max_tokens": 32768,
+            "presence_penalty": 0,
+            "temperature": 1,
+            "top_logprobs": 0,
+            "top_p": 1,
+        },
+        headers={"user-agent": "LiteLLM"},
+    )
+
+    assert "frequency_penalty" not in adapted.body
+    assert "max_output_tokens" not in adapted.body
+    assert "max_tokens" not in adapted.body
+    assert "presence_penalty" not in adapted.body
+    assert "temperature" not in adapted.body
+    assert "top_logprobs" not in adapted.body
+    assert "top_p" not in adapted.body
+
+
 def test_codex_chat_completions_url_with_responses_input_uses_body_shape():
     """Cursor may call chat completions with a Responses-shaped body."""
     adapter = CursorRequestAdapter(Settings(discovery_mode=True))

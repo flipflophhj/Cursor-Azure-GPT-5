@@ -96,7 +96,9 @@ class CodexAdapter:
                     and upstream_response.status_code == 200
                 ):
                     chunks = adapt_responses_sse_to_chat_sse(
-                        chunks, model=str(adapted.body.get("model", ""))
+                        chunks,
+                        model=str(adapted.body.get("model", "")),
+                        reasoning_display_mode=self.settings.reasoning_display_mode,
                     )
                 yield from chunks
             finally:
