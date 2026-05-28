@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import fcntl
 import json
 import os
 import time
@@ -14,6 +13,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import requests
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 REFRESH_URL = "https://auth.openai.com/oauth/token"
@@ -191,16 +195,38 @@ class CodexAuthStore:
     def refresh_lock(self) -> Iterator[None]:
         """Serialize refresh-token use across local workers/processes."""
         lock_path = self.path.with_suffix(self.path.suffix + ".lock")
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
+        with lock_path.open("a+b") as lock_file:
             try:
                 os.chmod(lock_path, 0o600)
             except OSError:
                 pass
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _acquire_file_lock(lock_file)
             try:
                 yield
             finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                _release_file_lock(lock_file)
+
+
+def _acquire_file_lock(lock_file: Any) -> None:
+    """Acquire an exclusive lock on a lock file."""
+    if os.name == "nt":
+        # Lock first byte with msvcrt on Windows.
+        lock_file.seek(0)
+        lock_file.write(b"0")
+        lock_file.flush()
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        return
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+
+def _release_file_lock(lock_file: Any) -> None:
+    """Release an exclusive lock on a lock file."""
+    if os.name == "nt":
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 class CodexAuthManager:
